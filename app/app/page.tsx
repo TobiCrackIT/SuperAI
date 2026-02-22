@@ -8,7 +8,9 @@ import {
   DEFAULT_MODELS_BY_PROVIDER,
   SUGGESTED_MODELS_BY_PROVIDER,
 } from "@/server/chat/catalog";
+import { listCompareRunHistory } from "@/server/chat/history";
 import { listProviderConnections } from "@/server/providers/connections";
+import type { CompareRunHistoryRecord } from "@/types/chat";
 import type { ProviderConnectionSummary } from "@/types/providers";
 import { signOut } from "./actions";
 
@@ -53,6 +55,8 @@ export default async function AppHomePage() {
 
   let connections: ProviderConnectionSummary[] = [];
   let connectionsError: string | null = null;
+  let historyRuns: CompareRunHistoryRecord[] = [];
+  let historyError: string | null = null;
 
   try {
     connections =
@@ -62,6 +66,15 @@ export default async function AppHomePage() {
       error instanceof Error
         ? error.message
         : "Failed to load provider connections.";
+  }
+
+  try {
+    historyRuns = await listCompareRunHistory(12);
+  } catch (error) {
+    historyError =
+      error instanceof Error
+        ? error.message
+        : "Failed to load compare history.";
   }
 
   const hasEncryptionKey = hasProviderSecretsEncryptionKey();
@@ -144,11 +157,19 @@ export default async function AppHomePage() {
               using the compare UI.
             </div>
           ) : null}
+
+          {historyError ? (
+            <div className="mt-4 rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+              Compare history could not be loaded: {historyError}. Apply the
+              Phase 6 migration before using saved run history.
+            </div>
+          ) : null}
         </section>
 
         <CompareChatWorkbench
           connections={connections}
           defaultModelsByProvider={DEFAULT_MODELS_BY_PROVIDER}
+          initialHistoryRuns={historyRuns}
           suggestedModelsByProvider={SUGGESTED_MODELS_BY_PROVIDER}
           user={{
             id: user.id,

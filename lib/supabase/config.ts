@@ -1,4 +1,4 @@
-import { env, hasSupabaseClientEnv } from "@/lib/env";
+import { hasSupabaseClientEnv } from "@/lib/env";
 
 type SupabasePublicConfig = {
   anonKey: string;
@@ -16,8 +16,11 @@ export function getSupabasePublicConfig(): SupabasePublicConfig {
     );
   }
 
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
   return {
-    anonKey: env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    url: env.NEXT_PUBLIC_SUPABASE_URL!,
+    anonKey: anonKey!,
+    url: url!,
   };
 }

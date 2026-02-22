@@ -2,7 +2,7 @@ import Link from "next/link";
 import { env } from "@/lib/env";
 import { sanitizeNextPath } from "@/lib/auth/redirect";
 import { hasSupabasePublicConfig } from "@/lib/supabase/config";
-import { signInWithGoogle, signInWithMagicLink } from "./actions";
+import { signInWithGoogle } from "./actions";
 
 type SearchParamsInput =
   | Promise<Record<string, string | string[] | undefined>>
@@ -82,7 +82,11 @@ export default async function SignInPage({
               <span className="h-px flex-1 bg-zinc-200" />
             </div>
 
-            <form action={signInWithMagicLink} className="space-y-3">
+            <form
+              action="/auth/magic-link/start"
+              method="post"
+              className="space-y-3"
+            >
               <input type="hidden" name="next" value={nextPath} />
               <label className="block text-sm font-medium text-zinc-700">
                 Email address
@@ -92,14 +96,20 @@ export default async function SignInPage({
                 name="email"
                 required
                 placeholder="you@example.com"
-                className="w-full rounded-xl border border-zinc-300 bg-white px-4 py-3 text-sm ring-0 outline-none placeholder:text-zinc-400 focus:border-zinc-500"
+                disabled={!supabaseConfigured}
+                className="w-full rounded-xl border border-zinc-300 bg-white px-4 py-3 text-sm ring-0 outline-none placeholder:text-zinc-400 focus:border-zinc-500 disabled:cursor-not-allowed disabled:bg-zinc-100"
               />
               <button
                 type="submit"
-                className="inline-flex w-full items-center justify-center rounded-xl border border-zinc-300 bg-white px-4 py-3 text-sm font-medium text-zinc-950 transition hover:bg-zinc-50"
+                disabled={!supabaseConfigured}
+                className="inline-flex w-full items-center justify-center rounded-xl border border-zinc-300 bg-white px-4 py-3 text-sm font-medium text-zinc-950 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Send magic link
               </button>
+              <p className="text-xs leading-5 text-zinc-500">
+                Open the email link in this same browser and on the same host
+                (for example <code>localhost</code>, not <code>127.0.0.1</code>).
+              </p>
             </form>
           </div>
 

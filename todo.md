@@ -65,7 +65,7 @@
 - Useful output:
   - End-to-end user-facing MVP.
 
-## Phase 6: Persistence and history (current)
+## Phase 6: Persistence and history (completed)
 
 - Goal: enable continuity across sessions.
 - Deliverables:
@@ -76,7 +76,7 @@
 - Useful output:
   - Practical daily-use workflow.
 
-## Phase 7: Hardening and launch
+## Phase 7: Hardening and launch (current)
 
 - Goal: prepare production-ready reliability and deployment.
 - Deliverables:
