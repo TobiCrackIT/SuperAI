@@ -53,7 +53,7 @@
 - Useful output:
   - Core multi-model compare engine.
 
-## Phase 5: Compare-chat UI (current)
+## Phase 5: Compare-chat UI (completed)
 
 - Goal: deliver the primary user interaction experience.
 - Deliverables:
@@ -65,7 +65,7 @@
 - Useful output:
   - End-to-end user-facing MVP.
 
-## Phase 6: Persistence and history
+## Phase 6: Persistence and history (current)
 
 - Goal: enable continuity across sessions.
 - Deliverables:
