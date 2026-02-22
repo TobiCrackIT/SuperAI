@@ -28,9 +28,7 @@ export function parseEnv(input: EnvInput = process.env): AppEnv {
   });
 }
 
-export function hasSupabaseClientEnv(
-  input: EnvInput = process.env,
-): boolean {
+export function hasSupabaseClientEnv(input: EnvInput = process.env): boolean {
   return Boolean(
     input.NEXT_PUBLIC_SUPABASE_URL && input.NEXT_PUBLIC_SUPABASE_ANON_KEY,
   );
