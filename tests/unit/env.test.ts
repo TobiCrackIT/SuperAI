@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { hasSupabaseClientEnv, parseEnv } from "@/lib/env";
+import {
+  hasProviderSecretsEncryptionKey,
+  hasSupabaseClientEnv,
+  parseEnv,
+} from "@/lib/env";
 
 describe("parseEnv", () => {
   it("applies defaults when optional values are not provided", () => {
@@ -18,6 +22,7 @@ describe("parseEnv", () => {
       NEXT_PUBLIC_SUPABASE_URL: "https://example.supabase.co",
       NEXT_PUBLIC_SUPABASE_ANON_KEY: "anon-key",
       SUPABASE_SERVICE_ROLE_KEY: "service-key",
+      PROVIDER_SECRETS_ENCRYPTION_KEY: "base64-secret-key",
     });
 
     expect(env.NODE_ENV).toBe("test");
@@ -32,6 +37,15 @@ describe("parseEnv", () => {
       hasSupabaseClientEnv({
         NEXT_PUBLIC_SUPABASE_URL: "https://example.supabase.co",
         NEXT_PUBLIC_SUPABASE_ANON_KEY: "anon-key",
+      }),
+    ).toBe(true);
+  });
+
+  it("detects provider secret encryption key configuration", () => {
+    expect(hasProviderSecretsEncryptionKey({})).toBe(false);
+    expect(
+      hasProviderSecretsEncryptionKey({
+        PROVIDER_SECRETS_ENCRYPTION_KEY: "abc",
       }),
     ).toBe(true);
   });

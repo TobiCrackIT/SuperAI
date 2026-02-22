@@ -15,7 +15,7 @@
 - Useful output:
   - A clean baseline codebase ready for feature phases.
 
-## Phase 2: Auth and data foundation (current)
+## Phase 2: Auth and data foundation (completed)
 
 - Goal: implement user identity and persistent data layer.
 - Deliverables:
@@ -28,7 +28,7 @@
 - Useful output:
   - Secure user and data infrastructure.
 
-## Phase 3: Provider connection management
+## Phase 3: Provider connection management (completed)
 
 - Goal: allow users to connect AI providers safely.
 - Deliverables:
@@ -40,7 +40,7 @@
 - Useful output:
   - Reliable provider onboarding experience.
 
-## Phase 4: Multi-model orchestration and streaming
+## Phase 4: Multi-model orchestration and streaming (completed)
 
 - Goal: dispatch one prompt to many models concurrently.
 - Deliverables:
@@ -53,7 +53,7 @@
 - Useful output:
   - Core multi-model compare engine.
 
-## Phase 5: Compare-chat UI
+## Phase 5: Compare-chat UI (current)
 
 - Goal: deliver the primary user interaction experience.
 - Deliverables:

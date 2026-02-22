@@ -54,7 +54,7 @@ export default async function AppHomePage() {
                 {env.NEXT_PUBLIC_APP_NAME}
               </p>
               <h1 className="mt-2 text-2xl font-semibold tracking-tight">
-                Authenticated workspace (Phase 2 baseline)
+                Authenticated workspace (Phase 3 in progress)
               </h1>
             </div>
 
@@ -88,14 +88,22 @@ export default async function AppHomePage() {
         </section>
 
         <section className="rounded-3xl border border-zinc-200 bg-white p-8 shadow-sm">
-          <h2 className="text-lg font-semibold tracking-tight">
-            What this phase unlocks
-          </h2>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <h2 className="text-lg font-semibold tracking-tight">
+              What this phase unlocks
+            </h2>
+            <Link
+              href="/app/providers"
+              className="inline-flex rounded-xl bg-zinc-950 px-4 py-2 text-sm font-medium text-white transition hover:bg-zinc-800"
+            >
+              Manage provider connections
+            </Link>
+          </div>
           <ul className="mt-4 space-y-2 text-sm leading-6 text-zinc-600">
             <li>Authenticated app shell and protected routes</li>
             <li>Supabase-backed user sessions (OAuth and magic-link)</li>
             <li>
-              SQL migration + row-level security foundation for later phases
+              Provider settings UI with encrypted API-key storage and validation
             </li>
           </ul>
         </section>
