@@ -1,7 +1,10 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 import { sanitizeNextPath } from "@/lib/auth/redirect";
-import { getSupabasePublicConfig, hasSupabasePublicConfig } from "@/lib/supabase/config";
+import {
+  getSupabasePublicConfig,
+  hasSupabasePublicConfig,
+} from "@/lib/supabase/config";
 
 function buildSignInRedirect(
   request: NextRequest,

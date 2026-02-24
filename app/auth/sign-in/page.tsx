@@ -108,7 +108,8 @@ export default async function SignInPage({
               </button>
               <p className="text-xs leading-5 text-zinc-500">
                 Open the email link in this same browser and on the same host
-                (for example <code>localhost</code>, not <code>127.0.0.1</code>).
+                (for example <code>localhost</code>, not <code>127.0.0.1</code>
+                ).
               </p>
             </form>
           </div>
