@@ -70,3 +70,60 @@ export type CompareStreamEvent =
       timestamp: string;
       type: "session_complete";
     };
+
+export const persistedCompareTargetSchema = z.object({
+  connectionId: z.string().uuid().nullable().optional(),
+  connectionLabel: z.string().trim().min(1).max(128),
+  content: z.string(),
+  error: z.string().optional(),
+  finishReason: z.string().optional(),
+  model: z.string().trim().min(1),
+  provider: z.string().refine(isProviderId, "Unsupported provider."),
+  status: z.enum(["queued", "streaming", "done", "error"]),
+  targetId: z.string().trim().min(1),
+});
+
+export const persistCompareRunRequestSchema = z.object({
+  prompt: z.string().trim().min(1).max(20_000),
+  requestId: z.string().trim().min(1).optional(),
+  sessionError: z.string().optional(),
+  status: z.enum(["complete", "error", "aborted"]),
+  targets: z.array(persistedCompareTargetSchema).min(1).max(12),
+});
+
+export type PersistedCompareTarget = z.infer<
+  typeof persistedCompareTargetSchema
+> & {
+  provider: ProviderId;
+};
+
+export type PersistCompareRunRequest = z.infer<
+  typeof persistCompareRunRequestSchema
+> & {
+  targets: PersistedCompareTarget[];
+};
+
+export type CompareRunHistoryTarget = {
+  connectionId: string | null;
+  connectionLabel: string;
+  content: string;
+  error: string | null;
+  finishReason: string | null;
+  id: string;
+  model: string;
+  provider: ProviderId;
+  sortOrder: number;
+  status: "queued" | "streaming" | "done" | "error";
+  targetId: string;
+};
+
+export type CompareRunHistoryRecord = {
+  createdAt: string;
+  id: string;
+  prompt: string;
+  requestId: string | null;
+  sessionError: string | null;
+  status: "complete" | "error" | "aborted";
+  targets: CompareRunHistoryTarget[];
+  updatedAt: string;
+};

@@ -2,7 +2,11 @@
 
 import Link from "next/link";
 import { useMemo, useRef, useState } from "react";
-import type { CompareStreamEvent } from "@/types/chat";
+import type {
+  CompareRunHistoryRecord,
+  CompareStreamEvent,
+  PersistCompareRunRequest,
+} from "@/types/chat";
 import {
   PROVIDER_LABELS,
   type ProviderConnectionSummary,
@@ -21,7 +25,7 @@ type ProviderSelection = {
 };
 
 type CompareTargetCard = {
-  connectionId: string;
+  connectionId: string | null;
   content: string;
   error?: string;
   finishReason?: string;
@@ -35,7 +39,10 @@ type CompareTargetCard = {
 type CompareRun = {
   createdAt: string;
   error?: string;
+  historyId?: string;
   id: string;
+  persistedAt?: string;
+  persistState: "idle" | "saving" | "saved" | "save_error";
   prompt: string;
   requestId?: string;
   status: "streaming" | "complete" | "error" | "aborted";
@@ -43,8 +50,14 @@ type CompareRun = {
 };
 
 type CompareChatWorkbenchProps = {
+  appName: string;
   connections: ProviderConnectionSummary[];
+  connectionsLoadError: string | null;
   defaultModelsByProvider: DefaultModelCatalog;
+  hasEncryptionKey: boolean;
+  historyLoadError: string | null;
+  initialHistoryRuns: CompareRunHistoryRecord[];
+  signOutAction: () => Promise<void>;
   suggestedModelsByProvider: ModelCatalog;
   user: {
     email: string | null;
@@ -97,13 +110,41 @@ function createRunId(): string {
 function providerDotClass(status: CompareTargetCard["status"]): string {
   switch (status) {
     case "done":
-      return "bg-emerald-500";
+      return "bg-emerald-400";
     case "error":
-      return "bg-red-500";
+      return "bg-rose-400";
     case "streaming":
-      return "bg-amber-500";
+      return "bg-amber-300";
     default:
-      return "bg-zinc-300";
+      return "bg-zinc-500";
+  }
+}
+
+function runStatusPillClass(status: CompareRun["status"]): string {
+  switch (status) {
+    case "complete":
+      return "border-emerald-400/30 bg-emerald-400/10 text-emerald-200";
+    case "streaming":
+      return "border-amber-300/30 bg-amber-300/10 text-amber-100";
+    case "aborted":
+      return "border-zinc-400/30 bg-zinc-400/10 text-zinc-200";
+    case "error":
+      return "border-rose-400/30 bg-rose-400/10 text-rose-200";
+    default:
+      return "border-zinc-400/30 bg-zinc-400/10 text-zinc-200";
+  }
+}
+
+function persistPillClass(state: CompareRun["persistState"]): string {
+  switch (state) {
+    case "saved":
+      return "border-emerald-400/30 bg-emerald-400/10 text-emerald-200";
+    case "saving":
+      return "border-amber-300/30 bg-amber-300/10 text-amber-100";
+    case "save_error":
+      return "border-rose-400/30 bg-rose-400/10 text-rose-200";
+    default:
+      return "hidden";
   }
 }
 
@@ -152,18 +193,194 @@ async function readResponseError(response: Response): Promise<string> {
   }
 }
 
+function historyRunToUiRun(historyRun: CompareRunHistoryRecord): CompareRun {
+  return {
+    id: `history:${historyRun.id}`,
+    historyId: historyRun.id,
+    prompt: historyRun.prompt,
+    requestId: historyRun.requestId ?? undefined,
+    createdAt: historyRun.createdAt,
+    persistedAt: historyRun.updatedAt,
+    status: historyRun.status,
+    error: historyRun.sessionError ?? undefined,
+    persistState: "saved",
+    targets: historyRun.targets.map((target) => ({
+      id: target.targetId,
+      connectionId: target.connectionId,
+      provider: target.provider,
+      label: target.connectionLabel,
+      model: target.model,
+      content: target.content,
+      error: target.error ?? undefined,
+      finishReason: target.finishReason ?? undefined,
+      status: target.status,
+    })),
+  };
+}
+
+function applyStreamEvent(
+  run: CompareRun,
+  event: CompareStreamEvent,
+): CompareRun {
+  switch (event.type) {
+    case "session_started":
+      return {
+        ...run,
+        requestId: event.requestId,
+        status: "streaming",
+      };
+    case "target_started":
+      return {
+        ...run,
+        targets: run.targets.map((target) =>
+          target.id === event.targetId
+            ? { ...target, status: "streaming" }
+            : target,
+        ),
+      };
+    case "target_chunk":
+      return {
+        ...run,
+        targets: run.targets.map((target) =>
+          target.id === event.targetId
+            ? {
+                ...target,
+                status: "streaming",
+                content: target.content + event.delta,
+              }
+            : target,
+        ),
+      };
+    case "target_done":
+      return {
+        ...run,
+        targets: run.targets.map((target) =>
+          target.id === event.targetId
+            ? {
+                ...target,
+                status: "done",
+                finishReason: event.finishReason,
+              }
+            : target,
+        ),
+      };
+    case "target_error":
+      return {
+        ...run,
+        targets: run.targets.map((target) =>
+          target.id === event.targetId
+            ? {
+                ...target,
+                status: "error",
+                error: event.error,
+              }
+            : target,
+        ),
+      };
+    case "session_complete":
+      return {
+        ...run,
+        status: "complete",
+      };
+    default:
+      return run;
+  }
+}
+
+function buildPersistPayload(run: CompareRun): PersistCompareRunRequest | null {
+  if (
+    !(
+      run.status === "complete" ||
+      run.status === "error" ||
+      run.status === "aborted"
+    )
+  ) {
+    return null;
+  }
+
+  return {
+    prompt: run.prompt,
+    requestId: run.requestId,
+    status: run.status,
+    sessionError: run.error,
+    targets: run.targets.map((target) => ({
+      targetId: target.id,
+      provider: target.provider,
+      connectionId: target.connectionId ?? undefined,
+      connectionLabel: target.label,
+      model: target.model,
+      status: target.status,
+      content: target.content,
+      error: target.error,
+      finishReason: target.finishReason,
+    })),
+  };
+}
+
+function cloneHistoryRunIntoWorkspace(
+  historyRun: CompareRunHistoryRecord,
+): CompareRun {
+  const base = historyRunToUiRun(historyRun);
+
+  return {
+    ...base,
+    id: `replay:${historyRun.id}:${Date.now()}`,
+  };
+}
+
+function getCardStateKey(runId: string, targetId: string): string {
+  return `${runId}:${targetId}`;
+}
+
+function formatDateLabel(input: string): string {
+  return new Date(input).toLocaleString(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+}
+
+function SidebarIcon({ children }: { children: string }) {
+  return (
+    <span className="inline-flex size-7 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-sm text-zinc-200">
+      {children}
+    </span>
+  );
+}
+
 export function CompareChatWorkbench({
+  appName,
   connections,
+  connectionsLoadError,
   defaultModelsByProvider,
+  hasEncryptionKey,
+  historyLoadError,
+  initialHistoryRuns,
+  signOutAction,
   suggestedModelsByProvider,
   user,
 }: CompareChatWorkbenchProps) {
   const [prompt, setPrompt] = useState("");
   const [globalError, setGlobalError] = useState<string | null>(null);
-  const [runs, setRuns] = useState<CompareRun[]>([]);
+  const [historyError, setHistoryError] = useState<string | null>(
+    historyLoadError,
+  );
+  const [historyRuns, setHistoryRuns] =
+    useState<CompareRunHistoryRecord[]>(initialHistoryRuns);
+  const [runs, setRuns] = useState<CompareRun[]>(() =>
+    initialHistoryRuns.map(historyRunToUiRun),
+  );
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [expandedCards, setExpandedCards] = useState<Record<string, boolean>>(
-    {},
+    () => {
+      const initial: Record<string, boolean> = {};
+      for (const run of initialHistoryRuns) {
+        for (const target of run.targets) {
+          initial[getCardStateKey(`history:${run.id}`, target.targetId)] = true;
+        }
+      }
+      return initial;
+    },
   );
   const [selections, setSelections] = useState<ProviderSelection[]>(() =>
     buildInitialSelections(connections, defaultModelsByProvider),
@@ -175,19 +392,6 @@ export function CompareChatWorkbench({
     [selections],
   );
 
-  const activeConnectionsCount = useMemo(
-    () =>
-      connections.filter((connection) => connection.status === "active").length,
-    [connections],
-  );
-
-  const toggleCard = (cardId: string) => {
-    setExpandedCards((prev) => ({
-      ...prev,
-      [cardId]: !(prev[cardId] ?? true),
-    }));
-  };
-
   const updateRun = (
     runId: string,
     updater: (run: CompareRun) => CompareRun,
@@ -198,71 +402,122 @@ export function CompareChatWorkbench({
   };
 
   const applyStreamEventToRun = (runId: string, event: CompareStreamEvent) => {
-    updateRun(runId, (run) => {
-      switch (event.type) {
-        case "session_started":
-          return {
-            ...run,
-            requestId: event.requestId,
-            status: "streaming",
-          };
-        case "target_started":
-          return {
-            ...run,
-            targets: run.targets.map((target) =>
-              target.id === event.targetId
-                ? { ...target, status: "streaming" }
-                : target,
-            ),
-          };
-        case "target_chunk":
-          return {
-            ...run,
-            targets: run.targets.map((target) =>
-              target.id === event.targetId
-                ? {
-                    ...target,
-                    status: "streaming",
-                    content: target.content + event.delta,
-                  }
-                : target,
-            ),
-          };
-        case "target_done":
-          return {
-            ...run,
-            targets: run.targets.map((target) =>
-              target.id === event.targetId
-                ? {
-                    ...target,
-                    status: "done",
-                    finishReason: event.finishReason,
-                  }
-                : target,
-            ),
-          };
-        case "target_error":
-          return {
-            ...run,
-            targets: run.targets.map((target) =>
-              target.id === event.targetId
-                ? {
-                    ...target,
-                    status: "error",
-                    error: event.error,
-                  }
-                : target,
-            ),
-          };
-        case "session_complete":
-          return {
-            ...run,
-            status: "complete",
-          };
-        default:
-          return run;
-      }
+    updateRun(runId, (run) => applyStreamEvent(run, event));
+  };
+
+  const toggleCard = (cardStateKey: string) => {
+    setExpandedCards((prev) => ({
+      ...prev,
+      [cardStateKey]: !(prev[cardStateKey] ?? true),
+    }));
+  };
+
+  const upsertHistoryRun = (nextHistoryRun: CompareRunHistoryRecord) => {
+    setHistoryRuns((prev) => {
+      const withoutExisting = prev.filter(
+        (item) => item.id !== nextHistoryRun.id,
+      );
+      return [nextHistoryRun, ...withoutExisting].sort(
+        (a, b) =>
+          new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+      );
     });
+  };
+
+  const loadHistoryRunIntoWorkspace = (historyRun: CompareRunHistoryRecord) => {
+    const replayRun = cloneHistoryRunIntoWorkspace(historyRun);
+    setPrompt(historyRun.prompt);
+    setRuns((prev) => [replayRun, ...prev]);
+    setExpandedCards((prev) => {
+      const next = { ...prev };
+      for (const target of replayRun.targets) {
+        next[getCardStateKey(replayRun.id, target.id)] = true;
+      }
+      return next;
+    });
+    setSidebarOpen(false);
+  };
+
+  const persistRunToHistory = async (
+    runId: string,
+    runSnapshot: CompareRun,
+  ) => {
+    if (runSnapshot.persistState === "saved" || runSnapshot.historyId) {
+      return;
+    }
+
+    const payload = buildPersistPayload(runSnapshot);
+    if (!payload) {
+      return;
+    }
+
+    setHistoryError(null);
+    updateRun(runId, (run) => ({ ...run, persistState: "saving" }));
+
+    try {
+      const response = await fetch("/api/chat/history", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) {
+        const message = (await readResponseError(response)).trim();
+        throw new Error(
+          message || `Failed to save history (${response.status}).`,
+        );
+      }
+
+      const json = (await response.json()) as { run?: CompareRunHistoryRecord };
+      if (!json.run) {
+        throw new Error("History save succeeded but no run was returned.");
+      }
+
+      upsertHistoryRun(json.run);
+      updateRun(runId, (run) => ({
+        ...run,
+        historyId: json.run?.id,
+        createdAt: json.run?.createdAt ?? run.createdAt,
+        persistedAt: json.run?.updatedAt,
+        persistState: "saved",
+      }));
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Failed to save run history.";
+      setHistoryError(message);
+      updateRun(runId, (run) => ({ ...run, persistState: "save_error" }));
+    }
+  };
+
+  const refreshHistory = async () => {
+    setHistoryError(null);
+
+    try {
+      const response = await fetch("/api/chat/history?limit=20", {
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+        },
+      });
+
+      if (!response.ok) {
+        const message = (await readResponseError(response)).trim();
+        throw new Error(
+          message || `Failed to load history (${response.status}).`,
+        );
+      }
+
+      const json = (await response.json()) as {
+        runs?: CompareRunHistoryRecord[];
+      };
+      setHistoryRuns(json.runs ?? []);
+    } catch (error) {
+      setHistoryError(
+        error instanceof Error ? error.message : "Failed to refresh history.",
+      );
+    }
   };
 
   const stopActiveStream = () => {
@@ -298,7 +553,7 @@ export function CompareChatWorkbench({
     }
 
     if (activeSelections.length === 0) {
-      setGlobalError("Select at least one provider connection.");
+      setGlobalError("Select at least one provider connection in the sidebar.");
       return;
     }
 
@@ -306,35 +561,36 @@ export function CompareChatWorkbench({
 
     const runId = createRunId();
     const createdAt = new Date().toISOString();
-    const targets = activeSelections.map((selection, index) => ({
-      id: `${selection.provider}:${selection.connectionId}:${index}`,
-      connectionId: selection.connectionId,
-      provider: selection.provider,
-      label: selection.label,
-      model: selection.model,
-      content: "",
-      status: "queued" as const,
-    }));
+    const targets: CompareTargetCard[] = activeSelections.map(
+      (selection, index) => ({
+        id: `${selection.provider}:${selection.connectionId}:${index}`,
+        connectionId: selection.connectionId,
+        provider: selection.provider,
+        label: selection.label,
+        model: selection.model,
+        content: "",
+        status: "queued",
+      }),
+    );
+
+    let draftRun: CompareRun = {
+      id: runId,
+      createdAt,
+      prompt: trimmedPrompt,
+      status: "streaming",
+      persistState: "idle",
+      targets,
+    };
 
     setExpandedCards((prev) => {
       const next = { ...prev };
       for (const target of targets) {
-        next[target.id] = true;
+        next[getCardStateKey(runId, target.id)] = true;
       }
       return next;
     });
 
-    setRuns((prev) => [
-      {
-        id: runId,
-        createdAt,
-        prompt: trimmedPrompt,
-        status: "streaming",
-        targets,
-      },
-      ...prev,
-    ]);
-
+    setRuns((prev) => [draftRun, ...prev]);
     setActiveRunId(runId);
 
     const abortController = new AbortController();
@@ -359,20 +615,19 @@ export function CompareChatWorkbench({
 
       if (!response.ok) {
         const errorMessage = (await readResponseError(response)).trim();
-        updateRun(runId, (run) => ({
-          ...run,
+        const message =
+          errorMessage || `Request failed with status ${response.status}.`;
+        draftRun = {
+          ...draftRun,
           status: "error",
-          error:
-            errorMessage || `Request failed with status ${response.status}.`,
-          targets: run.targets.map((target) => ({
+          error: message,
+          targets: draftRun.targets.map((target) => ({
             ...target,
             status: "error",
-            error:
-              target.error ??
-              (errorMessage ||
-                `Request failed with status ${response.status}.`),
+            error: target.error ?? message,
           })),
-        }));
+        };
+        updateRun(runId, () => draftRun);
         return;
       }
 
@@ -397,20 +652,33 @@ export function CompareChatWorkbench({
         buffer = parsed.rest;
 
         for (const event of parsed.events) {
+          draftRun = applyStreamEvent(draftRun, event);
           applyStreamEventToRun(runId, event);
         }
       }
 
       const finalParsed = parseSseFrames(buffer + "\n\n");
       for (const event of finalParsed.events) {
+        draftRun = applyStreamEvent(draftRun, event);
         applyStreamEventToRun(runId, event);
       }
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
-        updateRun(runId, (run) => ({
-          ...run,
-          status: run.status === "complete" ? "complete" : "aborted",
-        }));
+        draftRun = {
+          ...draftRun,
+          status: "aborted",
+          error: draftRun.error ?? "Streaming stopped by user.",
+          targets: draftRun.targets.map((target) =>
+            target.status === "queued" || target.status === "streaming"
+              ? {
+                  ...target,
+                  status: "error",
+                  error: target.error ?? "Request aborted.",
+                }
+              : target,
+          ),
+        };
+        updateRun(runId, () => draftRun);
         return;
       }
 
@@ -418,11 +686,11 @@ export function CompareChatWorkbench({
         error instanceof Error
           ? error.message
           : "Failed to stream compare results.";
-      updateRun(runId, (run) => ({
-        ...run,
+      draftRun = {
+        ...draftRun,
         status: "error",
         error: message,
-        targets: run.targets.map((target) =>
+        targets: draftRun.targets.map((target) =>
           target.status === "queued" || target.status === "streaming"
             ? {
                 ...target,
@@ -431,88 +699,252 @@ export function CompareChatWorkbench({
               }
             : target,
         ),
-      }));
+      };
+      updateRun(runId, () => draftRun);
     } finally {
       if (abortControllerRef.current === abortController) {
         abortControllerRef.current = null;
       }
       setActiveRunId((current) => (current === runId ? null : current));
+
+      await persistRunToHistory(runId, draftRun);
     }
   };
 
   const activeRun = activeRunId
     ? runs.find((run) => run.id === activeRunId)
     : null;
+  const hasRuns = runs.length > 0;
 
-  return (
-    <div className="grid gap-6">
-      <section className="overflow-hidden rounded-3xl border border-zinc-200 bg-white shadow-sm">
-        <div className="border-b border-zinc-200 bg-gradient-to-r from-amber-50 via-white to-teal-50 px-6 py-5">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-            <div>
-              <p className="text-xs font-medium tracking-[0.18em] text-zinc-500 uppercase">
-                Compare Chat
-              </p>
-              <h2 className="mt-2 text-xl font-semibold tracking-tight text-zinc-950">
-                Prompt once, compare answers as they stream in
-              </h2>
-              <p className="mt-2 text-sm leading-6 text-zinc-600">
-                Select connected models, send a prompt, and watch each response
-                render in its own expandable card.
-              </p>
-            </div>
+  const renderComposer = (variant: "hero" | "dock") => {
+    const isHero = variant === "hero";
 
-            <div className="rounded-2xl border border-zinc-200 bg-white/80 px-4 py-3 text-xs text-zinc-600 backdrop-blur">
-              <div>
-                Signed in as{" "}
-                <span className="font-medium text-zinc-900">
-                  {user.email ?? user.id}
-                </span>
-              </div>
-              <div className="mt-1">
-                Active connections:{" "}
-                <span className="font-medium text-zinc-900">
-                  {activeConnectionsCount}
-                </span>
-              </div>
-            </div>
+    return (
+      <div
+        className={[
+          "rounded-[28px] border border-white/10 bg-white/[0.04] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] backdrop-blur",
+          isHero ? "w-full max-w-4xl" : "w-full",
+        ].join(" ")}
+      >
+        <div className="flex items-center gap-2 border-b border-white/5 px-3 py-2 text-xs text-zinc-400">
+          <button
+            type="button"
+            onClick={() => setPrompt("")}
+            className="inline-flex size-8 items-center justify-center rounded-full border border-white/10 bg-white/[0.03] text-base transition hover:bg-white/[0.07]"
+            aria-label="Clear prompt"
+          >
+            +
+          </button>
+          <span className="rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1 tracking-[0.14em] uppercase">
+            {activeSelections.length} target
+            {activeSelections.length === 1 ? "" : "s"}
+          </span>
+          {activeRun ? (
+            <span className="rounded-full border border-amber-300/20 bg-amber-300/10 px-2.5 py-1 tracking-[0.14em] text-amber-100 uppercase">
+              Streaming
+            </span>
+          ) : null}
+          <span className="ml-auto hidden sm:block">
+            Press Enter to compare
+          </span>
+        </div>
+
+        <div className="flex items-end gap-2 px-3 py-3">
+          <textarea
+            value={prompt}
+            onChange={(event) => setPrompt(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                if (!activeRun) {
+                  void submitPrompt();
+                }
+              }
+            }}
+            placeholder="Ask anything across multiple models..."
+            className="min-h-[60px] flex-1 resize-none bg-transparent px-2 py-2 text-[15px] leading-6 text-zinc-100 outline-none placeholder:text-zinc-500"
+          />
+
+          <div className="flex items-center gap-2 pb-1">
+            <button
+              type="button"
+              className="inline-flex size-10 items-center justify-center rounded-full border border-white/10 bg-white/[0.04] text-zinc-300 transition hover:bg-white/[0.08]"
+              aria-label="Voice input placeholder"
+              title="Voice input (coming soon)"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                className="size-4"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+              >
+                <path d="M12 4a3 3 0 0 0-3 3v5a3 3 0 1 0 6 0V7a3 3 0 0 0-3-3Z" />
+                <path d="M5 11a7 7 0 0 0 14 0" />
+                <path d="M12 18v3" />
+              </svg>
+            </button>
+
+            {activeRun ? (
+              <button
+                type="button"
+                onClick={stopActiveStream}
+                className="inline-flex size-10 items-center justify-center rounded-full border border-rose-300/20 bg-rose-300/10 text-rose-100 transition hover:bg-rose-300/20"
+                aria-label="Stop streaming"
+              >
+                <span className="block size-3 rounded-sm bg-current" />
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => void submitPrompt()}
+                disabled={
+                  activeSelections.length === 0 || prompt.trim().length === 0
+                }
+                className="inline-flex h-10 items-center gap-2 rounded-full bg-white px-4 text-sm font-medium text-zinc-950 transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  className="size-4"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                >
+                  <path d="M5 12h14" />
+                  <path d="m12 5 7 7-7 7" />
+                </svg>
+                Compare
+              </button>
+            )}
           </div>
         </div>
 
-        <div className="grid gap-6 p-6 xl:grid-cols-[380px_1fr]">
-          <div className="space-y-6">
-            <section className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
-              <div className="flex items-center justify-between">
-                <h3 className="text-sm font-semibold tracking-tight text-zinc-900">
-                  Model targets
+        {globalError ? (
+          <div className="px-4 pb-4">
+            <div className="rounded-xl border border-rose-300/20 bg-rose-300/10 px-3 py-2 text-sm text-rose-100">
+              {globalError}
+            </div>
+          </div>
+        ) : null}
+      </div>
+    );
+  };
+
+  return (
+    <div className="relative overflow-hidden rounded-[28px] border border-white/10 bg-[#0f1115] shadow-[0_20px_70px_rgba(0,0,0,0.45)]">
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_18%_12%,rgba(255,255,255,0.05),transparent_35%),radial-gradient(circle_at_80%_18%,rgba(103,232,249,0.05),transparent_35%),radial-gradient(circle_at_60%_70%,rgba(250,204,21,0.04),transparent_30%)]" />
+
+      <div className="relative flex h-[calc(100vh-1rem)] min-h-[720px]">
+        {sidebarOpen ? (
+          <button
+            type="button"
+            onClick={() => setSidebarOpen(false)}
+            className="absolute inset-0 z-20 bg-black/50 lg:hidden"
+            aria-label="Close sidebar"
+          />
+        ) : null}
+
+        <aside
+          className={[
+            "absolute inset-y-0 left-0 z-30 flex w-[300px] shrink-0 flex-col border-r border-white/10 bg-[#0a0b0e]/95 backdrop-blur-xl transition lg:static lg:z-0 lg:translate-x-0",
+            sidebarOpen ? "translate-x-0" : "-translate-x-full",
+          ].join(" ")}
+        >
+          <div className="flex items-center justify-between px-4 py-4">
+            <div className="flex items-center gap-3">
+              <div className="flex size-8 items-center justify-center rounded-xl bg-white text-sm font-semibold text-zinc-900">
+                S
+              </div>
+              <div>
+                <p className="text-sm font-medium text-zinc-100">{appName}</p>
+                <p className="text-xs text-zinc-500">Compare workspace</p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setSidebarOpen(false)}
+              className="inline-flex size-8 items-center justify-center rounded-lg border border-white/10 bg-white/[0.03] text-zinc-300 transition hover:bg-white/[0.08] lg:hidden"
+              aria-label="Close sidebar"
+            >
+              ×
+            </button>
+          </div>
+
+          <div className="px-3">
+            <button
+              type="button"
+              onClick={() => {
+                setPrompt("");
+                setGlobalError(null);
+                setSidebarOpen(false);
+              }}
+              className="flex w-full items-center gap-3 rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2.5 text-left text-sm text-zinc-100 transition hover:bg-white/[0.07]"
+            >
+              <SidebarIcon>✎</SidebarIcon>
+              <span>New compare</span>
+            </button>
+          </div>
+
+          <nav className="mt-4 px-3 text-sm text-zinc-300">
+            <div className="space-y-1">
+              <Link
+                href="/app/providers"
+                className="flex items-center gap-3 rounded-xl px-3 py-2 transition hover:bg-white/[0.05]"
+                onClick={() => setSidebarOpen(false)}
+              >
+                <SidebarIcon>◈</SidebarIcon>
+                <span>Provider settings</span>
+              </Link>
+              <button
+                type="button"
+                onClick={() => void refreshHistory()}
+                className="flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left transition hover:bg-white/[0.05]"
+              >
+                <SidebarIcon>↻</SidebarIcon>
+                <span>Refresh history</span>
+              </button>
+            </div>
+          </nav>
+
+          <div className="mt-4 min-h-0 flex-1 overflow-y-auto px-3 pb-4">
+            <section className="rounded-2xl border border-white/10 bg-white/[0.02] p-3">
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-xs font-medium tracking-[0.18em] text-zinc-400 uppercase">
+                  Compare targets
                 </h3>
-                <span className="text-xs tracking-[0.18em] text-zinc-500 uppercase">
-                  {activeSelections.length} selected
+                <span className="text-xs text-zinc-500">
+                  {activeSelections.length}
                 </span>
               </div>
 
+              {connectionsLoadError ? (
+                <div className="mt-3 rounded-xl border border-rose-300/20 bg-rose-300/10 p-3 text-xs leading-5 text-rose-100">
+                  {connectionsLoadError}
+                </div>
+              ) : null}
+
+              {!hasEncryptionKey ? (
+                <div className="mt-3 rounded-xl border border-amber-300/20 bg-amber-300/10 p-3 text-xs leading-5 text-amber-100">
+                  Add <code>PROVIDER_SECRETS_ENCRYPTION_KEY</code> to enable
+                  saved-key retrieval.
+                </div>
+              ) : null}
+
               {selections.length === 0 ? (
-                <div className="mt-4 rounded-xl border border-dashed border-zinc-300 bg-white p-4 text-sm text-zinc-600">
-                  No provider connections found yet. Add API keys in{" "}
-                  <Link
-                    href="/app/providers"
-                    className="font-medium text-zinc-900 underline underline-offset-4"
-                  >
-                    Provider Settings
-                  </Link>{" "}
-                  before starting a comparison.
+                <div className="mt-3 rounded-xl border border-dashed border-white/10 bg-black/20 p-3 text-xs leading-5 text-zinc-400">
+                  No provider connections yet. Add keys in Provider Settings.
                 </div>
               ) : (
-                <div className="mt-4 space-y-3">
+                <div className="mt-3 space-y-3">
                   {selections.map((selection) => {
-                    const datalistId = `models-${selection.provider}`;
+                    const datalistId = `sidebar-models-${selection.provider}-${selection.connectionId}`;
 
                     return (
                       <div
                         key={selection.connectionId}
-                        className="rounded-xl border border-zinc-200 bg-white p-3"
+                        className="rounded-xl border border-white/10 bg-black/20 p-3"
                       >
-                        <div className="flex items-start gap-3">
+                        <div className="flex items-start gap-2">
                           <input
                             type="checkbox"
                             checked={selection.selected}
@@ -528,22 +960,17 @@ export function CompareChatWorkbench({
                                 ),
                               )
                             }
-                            className="mt-1 size-4 rounded border-zinc-300 text-zinc-900 focus:ring-zinc-500"
+                            className="mt-1 size-4 rounded border-zinc-500 bg-transparent text-zinc-100"
                           />
-
                           <div className="min-w-0 flex-1">
                             <div className="flex flex-wrap items-center gap-2">
-                              <span className="text-sm font-medium text-zinc-900">
+                              <span className="truncate text-sm font-medium text-zinc-100">
                                 {selection.label}
                               </span>
-                              <span className="rounded-full border border-zinc-200 bg-zinc-50 px-2 py-0.5 text-[11px] tracking-[0.12em] text-zinc-500 uppercase">
+                              <span className="rounded-full border border-white/10 bg-white/[0.03] px-2 py-0.5 text-[10px] tracking-[0.14em] text-zinc-400 uppercase">
                                 {PROVIDER_LABELS[selection.provider]}
                               </span>
                             </div>
-
-                            <label className="mt-3 block text-xs font-medium tracking-[0.14em] text-zinc-500 uppercase">
-                              Model
-                            </label>
                             <input
                               list={datalistId}
                               value={selection.model}
@@ -556,8 +983,8 @@ export function CompareChatWorkbench({
                                   ),
                                 )
                               }
-                              className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 disabled:cursor-not-allowed disabled:bg-zinc-100"
                               disabled={!selection.selected}
+                              className="mt-2 w-full rounded-lg border border-white/10 bg-white/[0.03] px-2.5 py-2 text-xs text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-white/20 disabled:cursor-not-allowed disabled:opacity-50"
                               placeholder={
                                 defaultModelsByProvider[selection.provider]
                               }
@@ -578,207 +1005,329 @@ export function CompareChatWorkbench({
               )}
             </section>
 
-            <section className="rounded-2xl border border-zinc-200 bg-white p-4">
-              <div className="flex items-center justify-between">
-                <h3 className="text-sm font-semibold tracking-tight text-zinc-900">
-                  Prompt composer
+            <section className="mt-4 rounded-2xl border border-white/10 bg-white/[0.02] p-3">
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-xs font-medium tracking-[0.18em] text-zinc-400 uppercase">
+                  Saved comparisons
                 </h3>
-                {activeRun ? (
-                  <span className="text-xs tracking-[0.18em] text-amber-600 uppercase">
-                    Streaming
-                  </span>
-                ) : null}
+                <span className="text-xs text-zinc-500">
+                  {historyRuns.length}
+                </span>
               </div>
 
-              <textarea
-                value={prompt}
-                onChange={(event) => setPrompt(event.target.value)}
-                placeholder="Ask a question or paste a prompt to compare responses across models..."
-                className="mt-3 min-h-36 w-full resize-y rounded-xl border border-zinc-300 bg-zinc-50 px-4 py-3 text-sm leading-6 text-zinc-900 ring-0 outline-none placeholder:text-zinc-400 focus:border-zinc-500"
-              />
-
-              {globalError ? (
-                <div className="mt-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-                  {globalError}
+              {historyError ? (
+                <div className="mt-3 rounded-xl border border-amber-300/20 bg-amber-300/10 p-3 text-xs leading-5 text-amber-100">
+                  {historyError}
                 </div>
               ) : null}
 
-              <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                <p className="text-xs leading-5 text-zinc-500">
-                  The response stream is neutral and side-by-side. No automatic
-                  ranking is applied.
+              {historyRuns.length === 0 ? (
+                <p className="mt-3 text-xs leading-5 text-zinc-500">
+                  Completed compare runs will appear here and can be loaded back
+                  into the workspace.
                 </p>
-
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setPrompt("")}
-                    className="inline-flex items-center justify-center rounded-xl border border-zinc-300 bg-white px-4 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50"
-                  >
-                    Clear
-                  </button>
-
-                  {activeRun ? (
+              ) : (
+                <div className="mt-3 space-y-2">
+                  {historyRuns.map((historyRun) => (
                     <button
+                      key={historyRun.id}
                       type="button"
-                      onClick={stopActiveStream}
-                      className="inline-flex items-center justify-center rounded-xl border border-red-300 bg-white px-4 py-2 text-sm font-medium text-red-700 transition hover:bg-red-50"
+                      onClick={() => loadHistoryRunIntoWorkspace(historyRun)}
+                      className="w-full rounded-xl border border-white/10 bg-black/20 p-3 text-left transition hover:border-white/20 hover:bg-white/[0.04]"
                     >
-                      Stop
+                      <div className="line-clamp-2 text-sm text-zinc-100">
+                        {historyRun.prompt}
+                      </div>
+                      <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
+                        <span>{formatDateLabel(historyRun.createdAt)}</span>
+                        <span>•</span>
+                        <span className="tracking-[0.14em] uppercase">
+                          {historyRun.status}
+                        </span>
+                      </div>
                     </button>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={submitPrompt}
-                      disabled={
-                        activeSelections.length === 0 ||
-                        prompt.trim().length === 0
-                      }
-                      className="inline-flex items-center justify-center rounded-xl bg-zinc-950 px-4 py-2 text-sm font-medium text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      Send to {Math.max(activeSelections.length, 1)} model
-                      {activeSelections.length === 1 ? "" : "s"}
-                    </button>
-                  )}
+                  ))}
                 </div>
-              </div>
+              )}
             </section>
           </div>
 
-          <div className="space-y-5">
-            {runs.length === 0 ? (
-              <section className="rounded-2xl border border-dashed border-zinc-300 bg-white p-8 text-center shadow-sm">
-                <h3 className="text-lg font-semibold tracking-tight text-zinc-900">
-                  No comparisons yet
-                </h3>
-                <p className="mt-2 text-sm leading-6 text-zinc-600">
-                  Select one or more provider connections, enter a prompt, and
-                  start streaming results.
-                </p>
-              </section>
-            ) : (
-              runs.map((run) => (
-                <section
-                  key={run.id}
-                  className="rounded-2xl border border-zinc-200 bg-white shadow-sm"
-                >
-                  <div className="border-b border-zinc-200 px-5 py-4">
-                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                      <div>
-                        <p className="text-xs tracking-[0.18em] text-zinc-500 uppercase">
-                          Prompt
-                        </p>
-                        <p className="mt-2 text-sm leading-6 whitespace-pre-wrap text-zinc-900">
-                          {run.prompt}
-                        </p>
-                      </div>
+          <div className="border-t border-white/10 p-3">
+            <div className="mb-2 rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2">
+              <p className="truncate text-sm text-zinc-100">
+                {user.email ?? user.id}
+              </p>
+              <p className="mt-0.5 text-xs text-zinc-500">Signed in</p>
+            </div>
+            <form action={signOutAction}>
+              <button
+                type="submit"
+                className="inline-flex w-full items-center justify-center rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2 text-sm text-zinc-200 transition hover:bg-white/[0.08]"
+              >
+                Sign out
+              </button>
+            </form>
+          </div>
+        </aside>
 
-                      <div className="shrink-0 rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs text-zinc-600">
-                        <div>
-                          {new Date(run.createdAt).toLocaleString(undefined, {
-                            dateStyle: "medium",
-                            timeStyle: "short",
-                          })}
-                        </div>
-                        <div className="mt-1 tracking-[0.14em] uppercase">
-                          Status: {run.status}
-                        </div>
-                      </div>
+        <section className="relative flex min-w-0 flex-1 flex-col bg-[#111318]">
+          <header className="flex items-center justify-between gap-3 border-b border-white/10 px-4 py-3 sm:px-5">
+            <div className="flex min-w-0 items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setSidebarOpen(true)}
+                className="inline-flex size-9 items-center justify-center rounded-lg border border-white/10 bg-white/[0.03] text-zinc-200 transition hover:bg-white/[0.08] lg:hidden"
+                aria-label="Open sidebar"
+              >
+                ☰
+              </button>
+              <button
+                type="button"
+                className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2 text-sm text-zinc-100"
+              >
+                <span className="truncate">SuperAI Compare</span>
+                <span className="text-zinc-500">▾</span>
+              </button>
+            </div>
+
+            <div className="hidden items-center gap-2 text-xs text-zinc-400 md:flex">
+              <span className="rounded-full border border-white/10 bg-white/[0.03] px-3 py-1.5 tracking-[0.14em] uppercase">
+                {activeSelections.length} targets active
+              </span>
+              <span className="rounded-full border border-white/10 bg-white/[0.03] px-3 py-1.5 tracking-[0.14em] uppercase">
+                /api/chat/stream
+              </span>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <Link
+                href="/app/providers"
+                className="inline-flex items-center justify-center rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-sm text-zinc-200 transition hover:bg-white/[0.08]"
+              >
+                Providers
+              </Link>
+              <span className="inline-flex size-9 items-center justify-center rounded-full border border-white/10 bg-white/[0.04] text-xs font-medium text-zinc-200">
+                {(user.email ?? user.id).slice(0, 2).toUpperCase()}
+              </span>
+            </div>
+          </header>
+
+          <div className="flex min-h-0 flex-1 flex-col">
+            <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6">
+              {connectionsLoadError || historyError || !hasEncryptionKey ? (
+                <div className="mb-4 space-y-2">
+                  {connectionsLoadError ? (
+                    <div className="rounded-2xl border border-rose-300/20 bg-rose-300/10 px-4 py-3 text-sm text-rose-100">
+                      Provider connections could not be loaded:{" "}
+                      {connectionsLoadError}
                     </div>
+                  ) : null}
+                  {historyError ? (
+                    <div className="rounded-2xl border border-amber-300/20 bg-amber-300/10 px-4 py-3 text-sm text-amber-100">
+                      Compare history could not be loaded: {historyError}
+                    </div>
+                  ) : null}
+                  {!hasEncryptionKey ? (
+                    <div className="rounded-2xl border border-amber-300/20 bg-amber-300/10 px-4 py-3 text-sm text-amber-100">
+                      Add <code>PROVIDER_SECRETS_ENCRYPTION_KEY</code> to stream
+                      using saved provider connections.
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
 
-                    {run.error ? (
-                      <div className="mt-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-                        {run.error}
-                      </div>
-                    ) : null}
+              {!hasRuns ? (
+                <div className="flex min-h-full flex-col items-center justify-center px-2 py-8">
+                  <div className="text-center">
+                    <p className="text-xs tracking-[0.22em] text-zinc-500 uppercase">
+                      Multi-model compare workspace
+                    </p>
+                    <h2 className="mt-4 text-4xl font-medium tracking-tight text-zinc-100 sm:text-5xl">
+                      Ready when you are.
+                    </h2>
+                    <p className="mx-auto mt-4 max-w-2xl text-sm leading-6 text-zinc-400 sm:text-base">
+                      Ask once and compare streaming responses from OpenAI,
+                      Anthropic, and Gemini side by side.
+                    </p>
                   </div>
 
-                  <div className="grid gap-4 p-5 xl:grid-cols-2">
-                    {run.targets.map((target) => {
-                      const isExpanded = expandedCards[target.id] ?? true;
-
-                      return (
-                        <article
-                          key={target.id}
-                          className="rounded-2xl border border-zinc-200 bg-zinc-50"
-                        >
-                          <button
-                            type="button"
-                            onClick={() => toggleCard(target.id)}
-                            className="flex w-full items-start justify-between gap-3 px-4 py-3 text-left"
-                          >
-                            <div className="min-w-0">
-                              <div className="flex flex-wrap items-center gap-2">
+                  <div className="mt-8 w-full">{renderComposer("hero")}</div>
+                </div>
+              ) : (
+                <div className="mx-auto w-full max-w-6xl space-y-5">
+                  {runs.map((run) => (
+                    <section
+                      key={run.id}
+                      className="overflow-hidden rounded-2xl border border-white/10 bg-white/[0.03] shadow-[0_6px_24px_rgba(0,0,0,0.18)]"
+                    >
+                      <div className="border-b border-white/10 px-4 py-4 sm:px-5">
+                        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="text-xs tracking-[0.18em] text-zinc-500 uppercase">
+                                Prompt
+                              </span>
+                              {run.persistState !== "idle" ? (
                                 <span
-                                  className={`inline-block size-2 rounded-full ${providerDotClass(
-                                    target.status,
+                                  className={`rounded-full border px-2 py-0.5 text-[11px] tracking-[0.14em] uppercase ${persistPillClass(
+                                    run.persistState,
                                   )}`}
-                                />
-                                <span className="text-sm font-semibold text-zinc-900">
-                                  {target.label}
+                                >
+                                  {run.persistState === "saved"
+                                    ? "Saved"
+                                    : run.persistState === "saving"
+                                      ? "Saving"
+                                      : "Save failed"}
                                 </span>
-                                <span className="rounded-full border border-zinc-200 bg-white px-2 py-0.5 text-[11px] tracking-[0.12em] text-zinc-500 uppercase">
-                                  {PROVIDER_LABELS[target.provider]}
-                                </span>
+                              ) : null}
+                              <span
+                                className={`rounded-full border px-2 py-0.5 text-[11px] tracking-[0.14em] uppercase ${runStatusPillClass(
+                                  run.status,
+                                )}`}
+                              >
+                                {run.status}
+                              </span>
+                            </div>
+                            <p className="mt-2 text-sm leading-6 whitespace-pre-wrap text-zinc-100">
+                              {run.prompt}
+                            </p>
+                          </div>
+
+                          <div className="shrink-0 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-xs text-zinc-400">
+                            <div>{formatDateLabel(run.createdAt)}</div>
+                            {run.requestId ? (
+                              <div className="mt-1 truncate text-[11px] text-zinc-500">
+                                {run.requestId}
                               </div>
-                              <p className="mt-1 text-xs text-zinc-600">
-                                {target.model}
-                              </p>
-                            </div>
+                            ) : null}
+                          </div>
+                        </div>
 
-                            <div className="flex shrink-0 items-center gap-2 text-xs text-zinc-600">
-                              <span className="tracking-[0.14em] uppercase">
-                                {target.status}
-                              </span>
-                              <span aria-hidden>
-                                {isExpanded ? "Hide" : "Show"}
-                              </span>
-                            </div>
-                          </button>
+                        {run.error ? (
+                          <div className="mt-3 rounded-xl border border-rose-300/20 bg-rose-300/10 px-3 py-2 text-sm text-rose-100">
+                            {run.error}
+                          </div>
+                        ) : null}
+                      </div>
 
-                          {isExpanded ? (
-                            <div className="border-t border-zinc-200 bg-white px-4 py-3">
-                              {target.error ? (
-                                <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-                                  {target.error}
+                      <div className="grid gap-4 p-4 sm:p-5 xl:grid-cols-2">
+                        {run.targets.map((target) => {
+                          const cardStateKey = getCardStateKey(
+                            run.id,
+                            target.id,
+                          );
+                          const isExpanded =
+                            expandedCards[cardStateKey] ?? true;
+
+                          return (
+                            <article
+                              key={`${run.id}-${target.id}`}
+                              className="overflow-hidden rounded-2xl border border-white/10 bg-black/20"
+                            >
+                              <button
+                                type="button"
+                                onClick={() => toggleCard(cardStateKey)}
+                                className="flex w-full items-start justify-between gap-3 px-4 py-3 text-left transition hover:bg-white/[0.03]"
+                              >
+                                <div className="min-w-0">
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <span
+                                      className={`inline-block size-2 rounded-full ${providerDotClass(
+                                        target.status,
+                                      )}`}
+                                    />
+                                    <span className="text-sm font-medium text-zinc-100">
+                                      {target.label}
+                                    </span>
+                                    <span className="rounded-full border border-white/10 bg-white/[0.03] px-2 py-0.5 text-[11px] tracking-[0.12em] text-zinc-400 uppercase">
+                                      {PROVIDER_LABELS[target.provider]}
+                                    </span>
+                                  </div>
+                                  <p className="mt-1 text-xs text-zinc-500">
+                                    {target.model}
+                                  </p>
+                                </div>
+
+                                <div className="flex shrink-0 items-center gap-2 text-xs text-zinc-500">
+                                  <span className="tracking-[0.14em] uppercase">
+                                    {target.status}
+                                  </span>
+                                  <span aria-hidden>
+                                    {isExpanded ? "Hide" : "Show"}
+                                  </span>
+                                </div>
+                              </button>
+
+                              {isExpanded ? (
+                                <div className="border-t border-white/10 bg-[#12151b] px-4 py-3">
+                                  {target.error ? (
+                                    <div className="mb-3 rounded-xl border border-rose-300/20 bg-rose-300/10 px-3 py-2 text-sm text-rose-100">
+                                      {target.error}
+                                    </div>
+                                  ) : null}
+
+                                  {target.content ? (
+                                    <pre className="text-sm leading-6 break-words whitespace-pre-wrap text-zinc-100">
+                                      {target.content}
+                                    </pre>
+                                  ) : target.status === "queued" ? (
+                                    <p className="text-sm text-zinc-500">
+                                      Waiting to start...
+                                    </p>
+                                  ) : target.status === "streaming" ? (
+                                    <p className="text-sm text-zinc-500">
+                                      Streaming response...
+                                    </p>
+                                  ) : (
+                                    <p className="text-sm text-zinc-500">
+                                      No content returned.
+                                    </p>
+                                  )}
+
+                                  <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                                    {target.finishReason ? (
+                                      <p className="text-xs tracking-[0.14em] text-zinc-500 uppercase">
+                                        Finish reason: {target.finishReason}
+                                      </p>
+                                    ) : (
+                                      <span />
+                                    )}
+                                    {target.content ? (
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          void navigator.clipboard.writeText(
+                                            target.content,
+                                          )
+                                        }
+                                        className="inline-flex items-center justify-center rounded-lg border border-white/10 bg-white/[0.03] px-2.5 py-1 text-xs text-zinc-300 transition hover:bg-white/[0.08]"
+                                      >
+                                        Copy
+                                      </button>
+                                    ) : null}
+                                  </div>
                                 </div>
                               ) : null}
+                            </article>
+                          );
+                        })}
+                      </div>
+                    </section>
+                  ))}
+                </div>
+              )}
+            </div>
 
-                              {target.content ? (
-                                <pre className="mt-0 text-sm leading-6 break-words whitespace-pre-wrap text-zinc-900">
-                                  {target.content}
-                                </pre>
-                              ) : target.status === "queued" ? (
-                                <p className="text-sm text-zinc-500">
-                                  Waiting to start...
-                                </p>
-                              ) : target.status === "streaming" ? (
-                                <p className="text-sm text-zinc-500">
-                                  Streaming response...
-                                </p>
-                              ) : (
-                                <p className="text-sm text-zinc-500">
-                                  No content returned.
-                                </p>
-                              )}
-
-                              {target.finishReason ? (
-                                <p className="mt-3 text-xs tracking-[0.14em] text-zinc-500 uppercase">
-                                  Finish reason: {target.finishReason}
-                                </p>
-                              ) : null}
-                            </div>
-                          ) : null}
-                        </article>
-                      );
-                    })}
-                  </div>
-                </section>
-              ))
-            )}
+            {hasRuns ? (
+              <div className="border-t border-white/10 bg-[#0f1115]/90 px-4 py-4 backdrop-blur sm:px-6">
+                <div className="mx-auto w-full max-w-6xl">
+                  {renderComposer("dock")}
+                </div>
+              </div>
+            ) : null}
           </div>
-        </div>
-      </section>
+        </section>
+      </div>
     </div>
   );
 }
