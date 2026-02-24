@@ -76,7 +76,23 @@
 - Useful output:
   - Practical daily-use workflow.
 
-## Phase 7: Hardening and launch (current)
+## Phase 7: UI/UX redesign (completed)
+
+- Goal: improve the interface and user experience to match the attached screenshot style (ChatGPT-like layout and interaction feel).
+- Deliverables:
+  - Dark, polished app shell with left sidebar navigation and clean top bar.
+  - Centered hero/chat state with large prompt entry surface styled like the screenshot.
+  - Improved spacing, typography, contrast, icons, and hover/focus states.
+  - Responsive behavior for desktop and mobile while preserving the core layout feel.
+  - Refined compare response cards so they visually fit the new interface.
+- Verification:
+  - Main `/app` workspace visually matches the reference layout direction (sidebar + centered composer + dark theme shell).
+  - Prompting and streaming interactions remain usable and readable after redesign.
+  - Keyboard navigation and focus visibility still work in the redesigned UI.
+- Useful output:
+  - A production-quality interface direction with a much better first impression and usability.
+
+## Phase 8: Hardening and launch (current)
 
 - Goal: prepare production-ready reliability and deployment.
 - Deliverables:
@@ -88,3 +104,20 @@
   - Production deploy succeeds with validated runtime behavior.
 - Useful output:
   - Launch-ready application baseline.
+
+## Phase 9: Provider auth options (API key default + OAuth where available) (planned)
+
+- Goal: let users connect providers using API keys by default, with OAuth as an optional path for providers that officially support third-party OAuth access.
+- Deliverables:
+  - Provider connection UX that supports selecting an auth method (`API key` default, `OAuth` when available).
+  - Provider capability matrix and UI messaging that clearly shows which providers/models support OAuth vs API key only.
+  - OAuth connect/callback/token refresh flows for supported providers.
+  - Secure token/key storage, rotation handling, and disconnect/re-auth flows.
+  - Policy/compliance guardrails to prevent unsupported consumer-login flows (for example, providers that only permit API keys for third-party apps).
+- Verification:
+  - Users can successfully connect providers with API keys across all supported providers.
+  - Users can complete OAuth connection for supported providers and reconnect after token expiry.
+  - Unsupported OAuth attempts are blocked with clear guidance and fallback to API key.
+  - Existing provider key connections continue working after auth-method support is added.
+- Useful output:
+  - Flexible provider onboarding with a safe default (API keys) and OAuth convenience where officially supported.
